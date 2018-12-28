@@ -1,11 +1,18 @@
-import tarfile
-import pickle
-import random
-import numpy as np
-import tensorflow as tf
 from urllib.request import urlretrieve
 from os.path import isfile, isdir
 from tqdm import tqdm
+import tarfile
+import pickle
+import numpy as np
+import matplotlib.pyplot as plt
+import tensorflow as tf
+
+
+epochs = 10
+batch_size = 128
+keep_probability = 0.7
+learning_rate = 0.001
+
 
 cifar10_dataset_folder_path = 'cifar-10-batches-py'
 
@@ -21,6 +28,17 @@ class DownloadProgress(tqdm):
     check if the data (zip) file is already downloaded
     if not, download it from "https://www.cs.toronto.edu/~kriz/cifar-10-python.tar.gz" and save as cifar-10-python.tar.gz
 """
+if not isfile('cifar-10-python.tar.gz'):
+    with DownloadProgress(unit='B', unit_scale=True, miniters=1, desc='CIFAR-10 Dataset') as pbar:
+        urlretrieve(
+            'https://www.cs.toronto.edu/~kriz/cifar-10-python.tar.gz',
+            'cifar-10-python.tar.gz',
+            pbar.hook)
+
+if not isdir(cifar10_dataset_folder_path):
+    with tarfile.open('cifar-10-python.tar.gz') as tar:
+        tar.extractall()
+        tar.close()
 
 def load_label_names():
     return ['airplane', 'automobile', 'bird', 'cat', 'deer', 'dog', 'frog', 'horse', 'ship', 'truck']
@@ -58,6 +76,8 @@ def display_stats(cifar10_dataset_folder_path, batch_id, sample_id):
     print('Image - Shape: {}'.format(sample_image.shape))
     print('Label - Label Id: {} Name: {}'.format(sample_label, label_names[sample_label]))
 
+    plt.imshow(sample_image)
+
 def normalize(x):
     """
         argument
@@ -89,6 +109,7 @@ def _preprocess_and_save(normalize, one_hot_encode, features, labels, filename):
     labels = one_hot_encode(labels)
 
     pickle.dump((features, labels), open(filename, 'wb'))
+
 
 def preprocess_and_save_data(cifar10_dataset_folder_path, normalize, one_hot_encode):
     n_batches = 5
@@ -135,6 +156,20 @@ def preprocess_and_save_data(cifar10_dataset_folder_path, normalize, one_hot_enc
     _preprocess_and_save(normalize, one_hot_encode,
                          np.array(test_features), np.array(test_labels),
                          'preprocess_training.p')
+
+
+preprocess_and_save_data(cifar10_dataset_folder_path, normalize, one_hot_encode)
+
+valid_features, valid_labels = pickle.load(open('preprocess_validation.p', mode='rb'))
+
+# Remove previous weights, bias, inputs, etc..
+tf.reset_default_graph()
+
+# Inputs
+x = tf.placeholder(tf.float32, shape=(None, 32, 32, 3), name='input_x')
+y =  tf.placeholder(tf.float32, shape=(None, 10), name='output_y')
+keep_prob = tf.placeholder(tf.float32, name='keep_prob')
+import tensorflow as tf
 
 def conv_net(x, keep_prob):
     conv1_filter = tf.Variable(tf.truncated_normal(shape=[3, 3, 3, 64], mean=0, stddev=0.08))
@@ -193,6 +228,18 @@ def conv_net(x, keep_prob):
     out = tf.contrib.layers.fully_connected(inputs=full3, num_outputs=10, activation_fn=None)
     return out
 
+
+logits = conv_net(x, keep_prob)
+model = tf.identity(logits, name='logits') # Name logits Tensor, so that can be loaded from disk after training
+
+# Loss and Optimizer
+cost = tf.reduce_mean(tf.nn.softmax_cross_entropy_with_logits(logits=logits, labels=y))
+optimizer = tf.train.AdamOptimizer(learning_rate=learning_rate).minimize(cost)
+
+# Accuracy
+correct_pred = tf.equal(tf.argmax(logits, 1), tf.argmax(y, 1))
+accuracy = tf.reduce_mean(tf.cast(correct_pred, tf.float32), name='accuracy')
+
 def train_neural_network(session, optimizer, keep_probability, feature_batch, label_batch):
     session.run(optimizer,
                 feed_dict={
@@ -200,7 +247,6 @@ def train_neural_network(session, optimizer, keep_probability, feature_batch, la
                     y: label_batch,
                     keep_prob: keep_probability
                 })
-
 def print_stats(session, feature_batch, label_batch, cost, accuracy):
     loss = sess.run(cost,
                     feed_dict={
@@ -217,79 +263,124 @@ def print_stats(session, feature_batch, label_batch, cost, accuracy):
 
     print('Loss: {:>10.4f} Validation Accuracy: {:.6f}'.format(loss, valid_acc))
 
-def main():
-    # Download the dataset (if not exist yet)
-    if not isfile('cifar-10-python.tar.gz'):
-        with DownloadProgress(unit='B', unit_scale=True, miniters=1, desc='CIFAR-10 Dataset') as pbar:
-            urlretrieve(
-                'https://www.cs.toronto.edu/~kriz/cifar-10-python.tar.gz',
-                'cifar-10-python.tar.gz',
-                pbar.hook)
+def batch_features_labels(features, labels, batch_size):
+    """
+    Split features and labels into batches
+    """
+    for start in range(0, len(features), batch_size):
+        end = min(start + batch_size, len(features))
+        yield features[start:end], labels[start:end]
 
-    if not isdir(cifar10_dataset_folder_path):
-        with tarfile.open('cifar-10-python.tar.gz') as tar:
-            tar.extractall()
-            tar.close()
+def load_preprocess_training_batch(batch_id, batch_size):
+    """
+    Load the Preprocessed Training data and return them in batches of <batch_size> or less
+    """
+    filename = 'preprocess_batch_' + str(batch_id) + '.p'
+    features, labels = pickle.load(open(filename, mode='rb'))
 
-    # Explore the dataset
-    batch_id = 3
-    sample_id = 7000
-    display_stats(cifar10_dataset_folder_path, batch_id, sample_id)
+    # Return the training data in batches of size <batch_size> or less
+    return batch_features_labels(features, labels, batch_size)
 
-    # Preprocess all the data and save it
-    preprocess_and_save_data(cifar10_dataset_folder_path, normalize, one_hot_encode)
+save_model_path = './image_classification'
 
-    # load the saved dataset
-    valid_features, valid_labels = pickle.load(open('preprocess_validation.p', mode='rb'))
+print('Training...')
+with tf.Session() as sess:
+    # Initializing the variables
+    sess.run(tf.global_variables_initializer())
 
-    # Hyper parameters
-    epochs = 10
-    batch_size = 128
-    keep_probability = 0.7
-    learning_rate = 0.001
+    # Training cycle
+    for epoch in range(epochs):
+        # Loop over all batches
+        n_batches = 5
+        for batch_i in range(1, n_batches + 1):
+            for batch_features, batch_labels in load_preprocess_training_batch(batch_i, batch_size):
+                train_neural_network(sess, optimizer, keep_probability, batch_features, batch_labels)
 
-    # Remove previous weights, bias, inputs, etc..
-    tf.reset_default_graph()
+            print('Epoch {:>2}, CIFAR-10 Batch {}:  '.format(epoch + 1, batch_i), end='')
+            print_stats(sess, batch_features, batch_labels, cost, accuracy)
 
-    # Inputs
-    x = tf.placeholder(tf.float32, shape=(None, 32, 32, 3), name='input_x')
-    y =  tf.placeholder(tf.float32, shape=(None, 10), name='output_y')
-    keep_prob = tf.placeholder(tf.float32, name='keep_prob')
+    # Save Model
+    saver = tf.train.Saver()
+    save_path = saver.save(sess, save_model_path)
 
-    # Build model
-    logits = conv_net(x, keep_prob)
-    model = tf.identity(logits, name='logits') # Name logits Tensor, so that can be loaded from disk after training
+import pickle
+import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.preprocessing import LabelBinarizer
 
-    # Loss and Optimizer
-    cost = tf.reduce_mean(tf.nn.softmax_cross_entropy_with_logits(logits=logits, labels=y))
-    optimizer = tf.train.AdamOptimizer(learning_rate=learning_rate).minimize(cost)
+def batch_features_labels(features, labels, batch_size):
+    """
+    Split features and labels into batches
+    """
+    for start in range(0, len(features), batch_size):
+        end = min(start + batch_size, len(features))
+        yield features[start:end], labels[start:end]
 
-    # Accuracy
-    correct_pred = tf.equal(tf.argmax(logits, 1), tf.argmax(y, 1))
-    accuracy = tf.reduce_mean(tf.cast(correct_pred, tf.float32), name='accuracy')
+def display_image_predictions(features, labels, predictions, top_n_predictions):
+    n_classes = 10
+    label_names = load_label_names()
+    label_binarizer = LabelBinarizer()
+    label_binarizer.fit(range(n_classes))
+    label_ids = label_binarizer.inverse_transform(np.array(labels))
 
-    # Training Phase
-    save_model_path = './image_classification'
+    fig, axies = plt.subplots(nrows=top_n_predictions, ncols=2, figsize=(20, 10))
+    fig.tight_layout()
+    fig.suptitle('Softmax Predictions', fontsize=20, y=1.1)
 
-    print('Training...')
-    with tf.Session() as sess:
-        # Initializing the variables
-        sess.run(tf.global_variables_initializer())
+    n_predictions = 3
+    margin = 0.05
+    ind = np.arange(n_predictions)
+    width = (1. - 2. * margin) / n_predictions
 
-        # Training cycle
-        for epoch in range(epochs):
-            # Loop over all batches
-            n_batches = 5
-            for batch_i in range(1, n_batches + 1):
-                for batch_features, batch_labels in helper.load_preprocess_training_batch(batch_i, batch_size):
-                    train_neural_network(sess, optimizer, keep_probability, batch_features, batch_labels)
+    for image_i, (feature, label_id, pred_indicies, pred_values) in enumerate(zip(features, label_ids, predictions.indices, predictions.values)):
+        if (image_i < top_n_predictions):
+            pred_names = [label_names[pred_i] for pred_i in pred_indicies]
+            correct_name = label_names[label_id]
 
-                print('Epoch {:>2}, CIFAR-10 Batch {}:  '.format(epoch + 1, batch_i), end='')
-                print_stats(sess, batch_features, batch_labels, cost, accuracy)
+            axies[image_i][0].imshow((feature*255).astype(np.int32, copy=False))
+            axies[image_i][0].set_title(correct_name)
+            axies[image_i][0].set_axis_off()
 
-        # Save Model
-        saver = tf.train.Saver()
-        save_path = saver.save(sess, save_model_path)
+            axies[image_i][1].barh(ind + margin, pred_values[:3], width)
+            axies[image_i][1].set_yticks(ind + margin)
+            axies[image_i][1].set_yticklabels(pred_names[::-1])
+            axies[image_i][1].set_xticks([0, 0.5, 1.0])
 
-if __name__ == "__main__":
-    main()
+import tensorflow as tf
+import pickle
+import random
+
+save_model_path = './image_classification'
+batch_size = 64
+n_samples = 10
+top_n_predictions = 5
+
+def test_model():
+    test_features, test_labels = pickle.load(open('preprocess_training.p', mode='rb'))
+    loaded_graph = tf.Graph()
+
+    with tf.Session(graph=loaded_graph) as sess:
+        # Load model
+        loader = tf.train.import_meta_graph(save_model_path + '.meta')
+        loader.restore(sess, save_model_path)
+
+        # Get Tensors from loaded model
+        loaded_x = loaded_graph.get_tensor_by_name('input_x:0')
+        loaded_y = loaded_graph.get_tensor_by_name('output_y:0')
+        loaded_keep_prob = loaded_graph.get_tensor_by_name('keep_prob:0')
+        loaded_logits = loaded_graph.get_tensor_by_name('logits:0')
+        loaded_acc = loaded_graph.get_tensor_by_name('accuracy:0')
+
+        # Get accuracy in batches for memory limitations
+        test_batch_acc_total = 0
+        test_batch_count = 0
+
+        for train_feature_batch, train_label_batch in batch_features_labels(test_features, test_labels, batch_size):
+            test_batch_acc_total += sess.run(
+                loaded_acc,
+                feed_dict={loaded_x: train_feature_batch, loaded_y: train_label_batch, loaded_keep_prob: 1.0})
+            test_batch_count += 1
+
+        print('Testing Accuracy: {}\n'.format(test_batch_acc_total/test_batch_count))
+
+test_model()
